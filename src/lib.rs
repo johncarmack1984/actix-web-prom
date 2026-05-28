@@ -989,10 +989,7 @@ mod tests {
             .build()
             .unwrap();
         assert_eq!(prom.normalize_pattern("/api/{tail:.*}"), "/api/{tail}");
-        assert_eq!(
-            prom.normalize_pattern("/users/{id:[0-9]+}"),
-            "/users/{id}"
-        );
+        assert_eq!(prom.normalize_pattern("/users/{id:[0-9]+}"), "/users/{id}");
         assert_eq!(prom.normalize_pattern("/plain/{name}"), "/plain/{name}");
         assert_eq!(prom.normalize_pattern("/no/params"), "/no/params");
     }
