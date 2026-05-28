@@ -341,14 +341,6 @@ use strfmt::strfmt;
 
 // Lazily initialized regex to strip regex constraints from path patterns
 // e.g., {tail:.*} -> {tail}, {id:[0-9]+} -> {id}
-fn normalize_pattern(pattern: &str) -> std::borrow::Cow<'_, str> {
-    static CONSTRAINT_RE: std::sync::LazyLock<Option<Regex>> =
-        std::sync::LazyLock::new(|| Regex::new(r"\{(\w+):[^}]+\}").ok());
-    match CONSTRAINT_RE.as_ref() {
-        Some(re) => re.replace_all(pattern, "{$1}"),
-        None => std::borrow::Cow::Borrowed(pattern),
-    }
-}
 
 /// `MetricsConfig` define middleware and config struct to change the behaviour of the metrics
 /// struct to define some particularities
@@ -501,6 +493,7 @@ impl PrometheusMetricsBuilder {
             .register(Box::new(http_requests_duration_seconds.clone()))?;
 
         let exclude_regex = RegexSet::new(self.exclude_regex)?;
+        let constraint_re = Regex::new(r"\{(\w+):[^}]+\}").ok();
 
         Ok(PrometheusMetrics {
             http_requests_total,
@@ -514,6 +507,7 @@ impl PrometheusMetricsBuilder {
             exclude_status: self.exclude_status,
             enable_http_version_label: self.metrics_configuration.labels.version.is_some(),
             unmatched_patterns_mask: self.unmatched_patterns_mask,
+            constraint_re,
         })
     }
 }
@@ -650,9 +644,17 @@ pub struct PrometheusMetrics {
     pub(crate) exclude_status: HashSet<StatusCode>,
     pub(crate) enable_http_version_label: bool,
     pub(crate) unmatched_patterns_mask: Option<String>,
+    pub(crate) constraint_re: Option<Regex>,
 }
 
 impl PrometheusMetrics {
+    fn normalize_pattern<'a>(&self, pattern: &'a str) -> std::borrow::Cow<'a, str> {
+        match &self.constraint_re {
+            Some(re) => re.replace_all(pattern, "{$1}"),
+            None => std::borrow::Cow::Borrowed(pattern),
+        }
+    }
+
     fn metrics(&self) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
         let mut buffer = vec![];
         TextEncoder::new().encode(&self.registry.gather(), &mut buffer)?;
@@ -822,7 +824,7 @@ where
                     params.insert(key.to_string(), format!("{{{key}}}"));
                 }
 
-                let normalized_pattern = normalize_pattern(&full_pattern);
+                let normalized_pattern = this.inner.normalize_pattern(&full_pattern);
 
                 if let Ok(mixed_cardinality_pattern) = strfmt(&normalized_pattern, &params) {
                     mixed_cardinality_pattern
@@ -981,14 +983,18 @@ mod tests {
 
     #[test]
     fn normalize_pattern_strips_constraints() {
-        // These assertions exercise the static regex inside normalize_pattern.
-        // If the regex is ever changed to an invalid pattern, normalization
-        // silently degrades and the output will no longer match, catching the
-        // regression in CI before it ships.
-        assert_eq!(normalize_pattern("/api/{tail:.*}"), "/api/{tail}");
-        assert_eq!(normalize_pattern("/users/{id:[0-9]+}"), "/users/{id}");
-        assert_eq!(normalize_pattern("/plain/{name}"), "/plain/{name}");
-        assert_eq!(normalize_pattern("/no/params"), "/no/params");
+        // If the regex pattern is ever changed to an invalid one, constraint_re
+        // will be None and normalization silently degrades — this catches that.
+        let prom = PrometheusMetricsBuilder::new("actix_web_prom")
+            .build()
+            .unwrap();
+        assert_eq!(prom.normalize_pattern("/api/{tail:.*}"), "/api/{tail}");
+        assert_eq!(
+            prom.normalize_pattern("/users/{id:[0-9]+}"),
+            "/users/{id}"
+        );
+        assert_eq!(prom.normalize_pattern("/plain/{name}"), "/plain/{name}");
+        assert_eq!(prom.normalize_pattern("/no/params"), "/no/params");
     }
 
     #[actix_web::test]
